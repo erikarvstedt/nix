@@ -146,8 +146,7 @@ GitInfo exportGit(ref<Store> store, const std::string & uri,
 
     printTalkative("using revision %s of repo '%s'", gitInfo.rev, uri);
 
-    std::string storeLinkName = hashString(htSHA512, name + std::string("\0"s) + gitInfo.rev).to_string(Base32, false);
-    Path storeLink = cacheDir + "/" + storeLinkName + ".link";
+    Path storeLink = cacheDir + "/" + rev + ".link";
     PathLocks storeLinkLock({storeLink}, fmt("waiting for lock on '%1%'...", storeLink)); // FIXME: broken
 
     try {
