@@ -1190,40 +1190,12 @@ void ConnectionHandle::withFramedSink(std::function<void(Sink & sink)> fun)
 
     std::exception_ptr ex;
 
-    /* Handle log messages / exceptions from the remote on a separate
-       thread. */
-    std::thread stderrThread([&]()
-    {
-        try {
-            processStderr(nullptr, nullptr, false);
-        } catch (...) {
-            ex = std::current_exception();
-        }
-    });
-
-    Finally joinStderrThread([&]()
-    {
-        if (stderrThread.joinable()) {
-            stderrThread.join();
-            if (ex) {
-                try {
-                    std::rethrow_exception(ex);
-                } catch (...) {
-                    ignoreException();
-                }
-            }
-        }
-    });
-
     {
         FramedSink sink((*this)->to, ex);
         fun(sink);
         sink.flush();
     }
-
-    stderrThread.join();
-    if (ex)
-        std::rethrow_exception(ex);
+    processStderr(nullptr, nullptr, false);
 }
 
 }
