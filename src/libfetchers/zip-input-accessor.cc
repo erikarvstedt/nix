@@ -108,7 +108,7 @@ struct ZipInputAccessor : InputAccessor
             || members.find(((std::string) path.abs() + "/").c_str()) != members.end();
     }
 
-    Stat lstat(const CanonPath & path) override
+    std::optional<Stat> maybeLstat(const CanonPath & path) override
     {
         if (path.isRoot())
             return Stat { .type = tDirectory };
@@ -122,7 +122,7 @@ struct ZipInputAccessor : InputAccessor
             type = tDirectory;
         }
         if (i == members.end())
-            throw Error("file '%s' does not exist", showPath(path));
+            return {};
 
         // FIXME: cache this
         zip_uint8_t opsys;
