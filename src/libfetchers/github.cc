@@ -212,75 +212,75 @@ struct GitArchiveInputScheme : InputScheme
 
     virtual DownloadUrl getDownloadUrl(const Input & input) const = 0;
 
-    std::pair<Input, GitRepo::TarballInfo> downloadArchive(ref<Store> store, Input input) const
+    std::pair<StorePath, Input> downloadArchive(ref<Store> store, Input input) const
     {
         if (!maybeGetStrAttr(input.attrs, "ref")) input.attrs.insert_or_assign("ref", "HEAD");
 
-        std::optional<Hash> upstreamTreeHash;
-
         auto rev = input.getRev();
-        if (!rev) {
-            auto refInfo = getRevFromRef(store, input);
-            rev = refInfo.rev;
-            upstreamTreeHash = refInfo.treeHash;
-            debug("HEAD revision for '%s' is %s", input.to_string(), refInfo.rev.gitRev());
-        }
+        if (!rev) rev = getRevFromRef(store, input).rev;
 
         input.attrs.erase("ref");
         input.attrs.insert_or_assign("rev", rev->gitRev());
 
-        auto cache = getCache();
+        Attrs lockedAttrs({
+                {"type", "git-zipball"},
+                {"rev", rev->gitRev()},
+            });
 
-        Attrs treeHashKey{{"_what", "gitRevToTreeHash"}, {"rev", rev->gitRev()}};
-        Attrs lastModifiedKey{{"_what", "gitRevToLastModified"}, {"rev", rev->gitRev()}};
+        if (auto res = getCache()->lookup(store, lockedAttrs))
+            return {std::move(res->second), std::move(input)};
 
-        if (auto treeHashAttrs = cache->lookup(treeHashKey)) {
-            if (auto lastModifiedAttrs = cache->lookup(lastModifiedKey)) {
-                auto treeHash = getRevAttr(*treeHashAttrs, "treeHash");
-                auto lastModified = getIntAttr(*lastModifiedAttrs, "lastModified");
-                if (getTarballCache()->hasObject(treeHash))
-                    return {std::move(input), GitRepo::TarballInfo { .treeHash = treeHash, .lastModified = (time_t) lastModified }};
-                else
-                    debug("Git tree with hash '%s' has disappeared from the cache, refetching...", treeHash.gitRev());
-            }
-        }
-
-        /* Stream the tarball into the tarball cache. */
         auto url = getDownloadUrl(input);
 
-        auto source = sinkToSource([&](Sink & sink) {
-            FileTransferRequest req(url.url);
-            req.headers = url.headers;
-            getFileTransfer()->download(std::move(req), sink);
-        });
+        auto res = downloadFile(store, url.url, input.getName(), true, url.headers);
 
-        auto tarballInfo = getTarballCache()->importTarball(*source);
+        getCache()->add(
+            store,
+            lockedAttrs,
+            {
+                {"rev", rev->gitRev()},
+            },
+            res.storePath,
+            true);
 
-        cache->upsert(treeHashKey, Attrs{{"treeHash", tarballInfo.treeHash.gitRev()}});
-        cache->upsert(lastModifiedKey, Attrs{{"lastModified", (uint64_t) tarballInfo.lastModified}});
-
-        if (upstreamTreeHash != tarballInfo.treeHash)
-            warn(
-                "Git tree hash mismatch for revision '%s' of '%s': "
-                "expected '%s', got '%s'. "
-                "This can happen if the Git repository uses submodules.",
-                rev->gitRev(), input.to_string(), upstreamTreeHash->gitRev(), tarballInfo.treeHash.gitRev());
-
-        return {std::move(input), tarballInfo};
+        return {res.storePath, std::move(input)};
     }
 
-    std::pair<ref<InputAccessor>, Input> getAccessor(ref<Store> store, const Input & _input) const override
+    std::pair<ref<InputAccessor>, Input> getAccessor(ref<Store> store, const Input & input) const override
     {
-        auto [input, tarballInfo] = downloadArchive(store, _input);
+        auto [storePath, input2] = downloadArchive(store, input);
 
-        input.attrs.insert_or_assign("treeHash", tarballInfo.treeHash.gitRev());
-        input.attrs.insert_or_assign("lastModified", uint64_t(tarballInfo.lastModified));
+        auto accessor = makeZipInputAccessor(CanonPath(store->toRealPath(storePath)));
 
-        auto accessor = getTarballCache()->getAccessor(tarballInfo.treeHash);
+        /* Compute the NAR hash of the contents of the zip file. This
+           is checked against the NAR hash in the lock file in
+           Input::checkLocks(). */
+        Attrs key({
+                {"_what", "zipNarHash"},
+                {"storePath", store->toRealPath(storePath.to_string())},
+            });
 
-        accessor->setPathDisplay("«" + input.to_string() + "»");
+        auto cache = getCache();
 
-        return {accessor, input};
+        auto narHash = [&]() {
+            if (auto res = cache->lookup(key)) {
+                return Hash::parseSRI(getStrAttr(*res, "narHash"));
+            } else {
+                auto narHash = accessor->hashPath(CanonPath::root);
+                cache->upsert(key, Attrs{{"narHash", narHash.to_string(HashFormat::SRI, true)}} );
+                return narHash;
+            }
+        }();
+
+        input2.attrs.insert_or_assign("narHash", narHash.to_string(HashFormat::SRI, true));
+
+        auto lastModified = accessor->getLastModified();
+        assert(lastModified);
+        input2.attrs.insert_or_assign("lastModified", uint64_t(*lastModified));
+
+        accessor->setPathDisplay("«" + input2.to_string() + "»");
+
+        return {accessor, input2};
     }
 
     bool isLocked(const Input & input) const override
@@ -364,10 +364,10 @@ struct GitHubInputScheme : GitArchiveInputScheme
         // urls so we do not run into rate limits.
         const auto urlFmt =
             host != "github.com"
-            ? "https://%s/api/v3/repos/%s/%s/tarball/%s"
+            ? "https://%s/api/v3/repos/%s/%s/zipball/%s"
             : headers.empty()
-            ? "https://%s/%s/%s/archive/%s.tar.gz"
-            : "https://api.%s/repos/%s/%s/tarball/%s";
+            ? "https://%s/%s/%s/archive/%s.zip"
+            : "https://api.%s/repos/%s/%s/zipball/%s";
 
         const auto url = fmt(urlFmt, host, getOwner(input), getRepo(input),
             input.getRev()->to_string(HashFormat::Base16, false));
@@ -434,7 +434,7 @@ struct GitLabInputScheme : GitArchiveInputScheme
         // is 10 reqs/sec/ip-addr.  See
         // https://docs.gitlab.com/ee/user/gitlab_com/index.html#gitlabcom-specific-rate-limits
         auto host = maybeGetStrAttr(input.attrs, "host").value_or("gitlab.com");
-        auto url = fmt("https://%s/api/v4/projects/%s%%2F%s/repository/archive.tar.gz?sha=%s",
+        auto url = fmt("https://%s/api/v4/projects/%s%%2F%s/repository/archive.zip?sha=%s",
             host, getStrAttr(input.attrs, "owner"), getStrAttr(input.attrs, "repo"),
             input.getRev()->to_string(HashFormat::Base16, false));
 
