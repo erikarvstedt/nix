@@ -41,6 +41,8 @@ struct InputAccessor : virtual SourceAccessor, std::enable_shared_from_this<Inpu
 
 typedef std::function<RestrictedPathError(const CanonPath & path)> MakeNotAllowedError;
 
+ref<InputAccessor> makeZipInputAccessor(const CanonPath & path);
+
 ref<InputAccessor> makePatchingInputAccessor(
     ref<InputAccessor> next,
     const std::vector<std::string> & patches);

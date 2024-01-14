@@ -229,6 +229,11 @@
               version = libgit2.lastModifiedDate;
               cmakeFlags = (attrs.cmakeFlags or []) ++ ["-DUSE_SSH=exec"];
             }))
+            (libzip.overrideDerivation (old: {
+              # Temporary workaround for https://github.com/NixOS/nixpkgs/pull/178755
+              cmakeFlags = old.cmakeFlags or [] ++ [ "-DBUILD_REGRESS=0" ];
+              patches = [ ./libzip-unix-time.patch ];
+            }))
             boost
             libsodium
           ]
