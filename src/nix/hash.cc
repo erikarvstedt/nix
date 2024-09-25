@@ -146,7 +146,7 @@ struct CmdHashConvert : Command
     CmdHashConvert(): to(HashFormat::SRI) {
         addFlag(Args::Flag::mkHashFormatOptFlag("from", &from));
         addFlag(Args::Flag::mkHashFormatFlagWithDefault("to", &to));
-        addFlag(Args::Flag::mkHashAlgoOptFlag("algo", &algo));
+        addFlag(Args::Flag::mkHashAlgoOptFlag("hash-algo", &algo));
         expectArgs({
            .label = "hashes",
            .handler = {&hashStrings},
